@@ -1,0 +1,13 @@
+{
+    "name": "Big Game Helper",
+    "version": "1.0.0",
+    "contactEmailAddress" : "dev@tnovak.dev",
+    "requiredDependencies": {
+        "prettyui": 6398181
+    },
+    "optionalPermissions": [
+        "chatAccess"
+    ],
+    "hasSettingsIcon": true,
+    "hasRibbonIcon": true
+}
