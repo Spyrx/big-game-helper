@@ -1,21 +1,23 @@
 -- Big Game Helper
--- A helper overlay for Big Game Hunter (currently the Anachronia dinosaurs). Everything it
--- shows is information the player can already see: their backpack, NPCs on screen, and game
--- messages in the chat box.
+-- A helper overlay for Big Game Hunter (the Anachronia dinosaurs, and the Havenhythe
+-- chinchompas and kebbits).
+-- Everything it shows is information the player can already see: their backpack, the creatures
+-- and scenery around them, the boss health bar, buff and debuff bars, and game messages in the
+-- chat box.
 
 local Settings = require("src/settings")
 local Tracker = require("src/tracker")
 local Encounter = require("src/encounter")
 local Overlay = require("src/overlay")
-local FrogLabels = require("src/frog_labels")
+local PoisonLabels = require("src/poison_labels")
 
--- The client runs 50 logic ticks per second, so this checks for frogs, dinosaurs, the boss
--- health bar and debuffs twice a second.
+-- The client runs 50 logic ticks per second, so this checks for creatures, poison carriers,
+-- the boss health bar, buffs and debuffs twice a second.
 local SCAN_INTERVAL_TICKS = 25
 
 local function refreshViews()
     Overlay.Render()
-    FrogLabels.Render()
+    PoisonLabels.Render()
 end
 
 Settings.Load()
@@ -35,7 +37,7 @@ Event.InventoryUpdated.Subscribe("bgh_inventory_updated", onInventoryChanged)
 
 Event.Logic.Subscribe("bgh_scan", function(event)
     if event.logicTick % SCAN_INTERVAL_TICKS == 0 then
-        Tracker.ScanNPCs(event.logicTick)
+        Tracker.Scan(event.logicTick)
         Encounter.Update()
     end
 end)
@@ -76,6 +78,6 @@ function PluginShutdown()
     Event.ContentLayerReady.Unsubscribe("bgh_content")
 
     Overlay.Destroy()
-    FrogLabels.Destroy()
+    PoisonLabels.Destroy()
     Settings.DestroyView()
 end

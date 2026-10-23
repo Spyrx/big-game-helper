@@ -4,6 +4,8 @@ local Settings = {
     values = {
         -- "auto" shows the overlay only while hunting; also "always" or "never".
         overlayMode = "auto",
+        -- Labels over frogs, moths and mushrooms. Named from when only frogs had them, and kept
+        -- so saved settings carry over.
         frogLabels = false,
     },
     view = nil,
@@ -20,7 +22,6 @@ function Settings.Load()
     if frogLabels ~= nil then Settings.values.frogLabels = frogLabels end
 end
 
---- Registers a callback that runs whenever a setting changes.
 function Settings.OnChange(callback)
     table.insert(Settings.listeners, callback)
 end
@@ -59,7 +60,7 @@ function Settings.BuildView(event)
 
     view:AddCheckboxButton({
         {
-            text = "Label poison frogs with their damage",
+            text = "Label poison frogs, moths and mushrooms with their damage",
             value = "frogLabels",
             selected = Settings.values.frogLabels,
         },
