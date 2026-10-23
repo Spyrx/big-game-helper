@@ -10,8 +10,8 @@ local Settings = require("src/settings")
 local Tracker = require("src/tracker")
 
 -- Default and minimum width. The window's inner width is width - 16 border - 28 padding
--- (316 at 360). The poison rows need that much for a two-digit "spears, frogs" count to
--- clear the damage column.
+-- (316 at 360). The poison rows need that much for a two-digit "spears, frogs" (or
+-- "moths, nearby") count to clear the damage column, and the "Set damage by hand" rows fill it.
 local MIN_WIDTH = 360
 local MAX_WIDTH = 520
 local DEFAULT_HEIGHT = 380
@@ -22,6 +22,8 @@ local Overlay = {
     window = nil,
     ---@type table? Components inside the window that get updated, while shown.
     widgets = nil,
+    -- The hunt the window was built for. It's rebuilt when the player switches hunts.
+    builtFor = nil,
     -- Set when the player closes the window; cleared when the next hunt starts.
     dismissed = false,
     -- Set when the player asks to see the window; it then stays open until closed.
@@ -45,35 +47,31 @@ local WARN_RGBA = 0xFFA040FF
 -- Text next to a 40px item slot is nudged down to sit on its centre line.
 local SLOT_TEXT_OFFSET = 8
 
--- Poison rows: the colour name column is as wide as the longest name, then the damage, then
--- the "spears, frogs" count right-aligned to the edge of the content.
+-- Poison rows: the poison name column is as wide as the longest name, then the damage, then
+-- the carried and nearby counts right-aligned to the edge of the content.
 local POISON_DAMAGE_WIDTH = 40
 local POISON_DETAIL_WIDTH = 150
 -- PrettyUI's default content padding, so right-aligned text ends where full-width rows
 -- (like the "Set damage by hand" header) do.
 local CONTENT_PADDING = 14
 
--- Layout of the "Set damage by hand" rows (label + 4 buttons = 294 wide).
--- The label column fits "Phantasmal", and the section's content isn't indented so the row fits.
+-- Layout of the "Set damage by hand" rows (label + 4 buttons = 314 wide).
+-- The label column fits "Blue-deathcap", and the section's content isn't indented so the row fits.
 local MANUAL_ROW_HEIGHT = 30
-local MANUAL_LABEL_WIDTH = 90
+local MANUAL_LABEL_WIDTH = 110
 local MANUAL_BUTTON_WIDTH = 48
 local MANUAL_BUTTON_GAP = 4
 
---- Width of the longest poison colour name in the overlay's font, plus a little room.
-local function poisonNameWidth()
+--- Width of the longest poison name in the overlay's font, plus a little room.
+local function poisonNameWidth(hunt)
     local widest = 0
-    for _, poison in ipairs(Data.POISONS) do
+    for _, poison in ipairs(hunt.poisons) do
         local succeeded, width = pcall(function()
             return config.Font.MUSEO_SANS_15PT_REGULAR:GetStringWidth(poison.label, false)
         end)
         widest = math.max(widest, succeeded and width or #poison.label * 8)
     end
     return widest + 6
-end
-
-local function plural(count, word)
-    return count .. " " .. word .. (count == 1 and "" or "s")
 end
 
 --- Adds an item icon followed by a count to the current row.
@@ -83,13 +81,13 @@ local function addCountedItem(window, obj, inline)
 end
 
 --- Adds the "Set damage by hand" section, for when chat access is off or a message was missed.
-local function addManualControls(window)
+local function addManualControls(window, hunt)
     -- The window keeps the size the player chose and scrolls if the section doesn't fit.
     local section = window:AddCollapseButton("Set damage by hand", {
         expanded = false,
         indent = 0,
     })
-    for index, poison in ipairs(Data.POISONS) do
+    for index, poison in ipairs(hunt.poisons) do
         local y = (index - 1) * MANUAL_ROW_HEIGHT
         section:AddText({
             text = poison.label,
@@ -126,7 +124,6 @@ local function addManualControls(window)
     end
 end
 
---- Saves the window's current position and size.
 local function savePlacement()
     local root = Overlay.window and Overlay.window.root
     if not root then return end
@@ -138,7 +135,7 @@ local function savePlacement()
     PersistentDB:SetInt("overlayHeight", Overlay.height)
 end
 
-local function build()
+local function build(hunt)
     local gameArea = ui.Interfaces:GetComponent(id.Component.TOPLEVEL_V2__GAME_AREA)
     if not gameArea then return end
 
@@ -168,17 +165,18 @@ local function build()
     local widgets = {}
     widgets.target = window:AddText({ text = "", colour = MUTED_RGBA })
 
-    -- Supplies in the backpack.
-    widgets.logs = addCountedItem(window, Data.LOGS, false)
-    widgets.vines = addCountedItem(window, Data.VINES, true)
-    widgets.spears = addCountedItem(window, Data.SPEAR, true)
-    widgets.trapSet = window:AddText({ text = "" })
+    -- Supplies in the backpack, in one row.
+    widgets.supplies = {}
+    for index, obj in ipairs(hunt.supplies) do
+        widgets.supplies[index] = addCountedItem(window, obj, index > 1)
+    end
+    if hunt.TrapSetStatus then widgets.trapSet = window:AddText({ text = "" }) end
 
-    -- One row per poison colour: poisoned spear icon, colour, damage, spears and frogs.
+    -- One row per poison: the poisoned item's icon, poison name, damage, carried and nearby.
     widgets.poisons = {}
-    local nameWidth = poisonNameWidth()
-    for _, poison in ipairs(Data.POISONS) do
-        window:AddItemSlot(poison.spear, { tooltip = poison.spear.name })
+    local nameWidth = poisonNameWidth(hunt)
+    for _, poison in ipairs(hunt.poisons) do
+        window:AddItemSlot(poison.item, { tooltip = poison.item.name })
         table.insert(widgets.poisons, {
             name = window:AddText({
                 text = poison.label,
@@ -207,10 +205,11 @@ local function build()
     end
     widgets.hint = window:AddText({ text = "", colour = MUTED_RGBA, height = 44 })
 
-    addManualControls(window)
+    addManualControls(window, hunt)
 
     Overlay.window = window
     Overlay.widgets = widgets
+    Overlay.builtFor = hunt
 end
 
 local function shouldShow()
@@ -226,22 +225,23 @@ local function shouldShow()
     local mode = Settings.values.overlayMode
     if mode == "never" then return false end
     if mode == "always" then return true end
-    -- "Only while hunting": from the first dinosaur seen in the hunting instance until leaving it.
+    -- "Only while hunting": from the first creature seen in the hunting instance until leaving it.
     return Encounter.inHunt or Tracker.atHuntingGround
 end
 
 --- Describes the current target, e.g. "Scimitops: 45,000 HP" or "Scimitops: 2 kills this session".
 local function targetLabel()
-    if not Tracker.dinosaur then return "Target: no dinosaur seen yet" end
+    local creature = Tracker.creature
+    if not creature then return "Target: no " .. Tracker.hunt.creatureWord .. " seen yet" end
     if Encounter.barVisible and Encounter.hp then
-        return Tracker.dinosaur .. ": " .. Data.FormatNumber(Encounter.hp) .. " HP"
+        return creature .. ": " .. Data.FormatNumber(Encounter.hp) .. " HP"
     end
-    local kills = Encounter.KillCount(Tracker.dinosaur)
-    if kills == 0 then return "Target: " .. Tracker.dinosaur end
-    return Tracker.dinosaur .. ": " .. plural(kills, "kill") .. " this session"
+    local kills = Encounter.KillCount(creature)
+    if kills == 0 then return "Target: " .. creature end
+    return creature .. ": " .. Data.Plural(kills, "kill") .. " this session"
 end
 
---- Returns the damage label and its colour for one poison against the current dinosaur.
+--- Returns the damage label and its colour for one poison against the current creature.
 --- Every seen value is shown the same way; the overlay records damage, it doesn't recommend.
 local function damageLabel(poisonIndex)
     local damage = Tracker.GetDamage(poisonIndex)
@@ -249,60 +249,44 @@ local function damageLabel(poisonIndex)
     return Data.FormatDamage(damage), TEXT_RGBA
 end
 
---- Describes what's missing for one full trap set, if anything. Spears not yet made are
---- counted as the logs needed to fletch them.
-local function trapSetLabel()
-    local cost = Data.TRAP_SET_COST
-    local spears = Tracker.counts.spears
-    for index = 1, #Data.POISONS do spears = spears + Tracker.poisonedSpears[index] end
-    local spearsToMake = math.max(0, cost.spears - spears)
-    local logsNeeded = cost.logs + spearsToMake * Data.LOGS_PER_SPEAR
-
-    local short = {}
-    if Tracker.counts.logs < logsNeeded then table.insert(short, plural(logsNeeded - Tracker.counts.logs, "log")) end
-    if Tracker.counts.vines < cost.vines then table.insert(short, plural(cost.vines - Tracker.counts.vines, "vine")) end
-
-    if #short == 0 then return "Enough for a full trap set", GOOD_RGBA end
-    return "Short for a trap set: " .. table.concat(short, ", "), WARN_RGBA
-end
-
-local function hintLabel()
+local function hintLabel(hunt)
     if not Settings.HasChatAccess() then
         return "Chat access is off, so set damage by hand below."
     end
-    for index = 1, #Data.POISONS do
+    for index = 1, #hunt.poisons do
         if Tracker.GetDamage(index) then return "" end
     end
-    return "Damage fills in from your game messages as poisoned spears hit."
+    return "Damage fills in from your game messages as " .. hunt.hitDescription .. "."
 end
 
---- Shows, hides and refreshes the overlay to match the tracked data.
 function Overlay.Render()
+    local hunt = Tracker.hunt
     local show = shouldShow()
-    if show and not Overlay.window then build() end
-    if not show and Overlay.window then Overlay.Destroy() end
+    if Overlay.window and (not show or Overlay.builtFor ~= hunt) then Overlay.Destroy() end
+    if show and not Overlay.window then build(hunt) end
     if not Overlay.window then return end
 
     local widgets = Overlay.widgets --[[@as table]]
     widgets.target.content = targetLabel()
 
-    widgets.logs.content = tostring(Tracker.counts.logs)
-    widgets.vines.content = tostring(Tracker.counts.vines)
-    widgets.spears.content = tostring(Tracker.counts.spears)
+    for index, obj in ipairs(hunt.supplies) do
+        widgets.supplies[index].content = tostring(Tracker.Count(obj))
+    end
 
-    local trapSetText, trapSetRgba = trapSetLabel()
-    widgets.trapSet.content = trapSetText
-    widgets.trapSet.rgba = trapSetRgba
+    if widgets.trapSet then
+        local trapSetText, enough = hunt.TrapSetStatus(Tracker.Count)
+        widgets.trapSet.content = trapSetText
+        widgets.trapSet.rgba = enough and GOOD_RGBA or WARN_RGBA
+    end
 
     for index, row in ipairs(widgets.poisons) do
         local text, rgba = damageLabel(index)
         row.damage.content = text
         row.damage.rgba = rgba
-        row.detail.content = plural(Tracker.poisonedSpears[index], "spear") .. ", "
-            .. plural(Tracker.frogCounts[index], "frog")
+        row.detail.content = hunt.Detail(Tracker.Count(hunt.poisons[index].item), Tracker.carrierCounts[index] or 0)
     end
 
-    widgets.hint.content = hintLabel()
+    widgets.hint.content = hintLabel(hunt)
 end
 
 --- Opens the overlay on request, whatever the "Show the overlay" setting, until it's closed.
@@ -318,6 +302,7 @@ function Overlay.Destroy()
     Overlay.window:Destroy()
     Overlay.window = nil
     Overlay.widgets = nil
+    Overlay.builtFor = nil
 end
 
 return Overlay
